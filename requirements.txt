@@ -1,6 +1,5 @@
-streamlit==1.48.0
-requests==2.32.4
-beautifulsoup4==4.13.4
-pandas==2.3.1
-openpyxl==3.1.5
-duckduckgo_search==2.4.0
+streamlit
+openai
+requests
+pandas
+duckduckgo_search
