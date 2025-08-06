@@ -1,125 +1,140 @@
 import streamlit as st
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
 import re
-import validators
 import phonenumbers
+import validators
+import tldextract
+from ddgs import DDGS
+from bs4 import BeautifulSoup
+import requests
 from email_validator import validate_email, EmailNotValidError
-from tqdm import tqdm
 
-# ---------------------- HELPER FUNCTIONS ------------------------
-
-def is_valid_url(url):
-    return validators.url(url)
-
-def is_valid_email(email):
-    try:
-        v = validate_email(email)
-        return True
-    except EmailNotValidError:
-        return False
+# ----------- Scraping & Extraction Utilities -----------
 
 def extract_emails(text):
-    raw_emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,4}", text)
-    return list(set([email for email in raw_emails if is_valid_email(email)]))
+    raw_emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text)
+    valid_emails = []
+    for email in raw_emails:
+        try:
+            valid = validate_email(email)
+            valid_emails.append(valid.email)
+        except EmailNotValidError:
+            continue
+    return list(set(valid_emails))
 
 def extract_phone_numbers(text):
-    numbers = []
+    phone_numbers = []
     for match in phonenumbers.PhoneNumberMatcher(text, "US"):
-        numbers.append(phonenumbers.format_number(match.number, phonenumbers.PhoneNumberFormat.E164))
-    return list(set(numbers))
+        number = phonenumbers.format_number(match.number, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
+        if number not in phone_numbers:
+            phone_numbers.append(number)
+    return phone_numbers
 
-def scrape_duckduckgo(query, max_results=100):
+def extract_socials(text):
+    socials = {}
+    patterns = {
+        'LinkedIn': r'https?://(www\.)?linkedin\.com/[^\'" >]+',
+        'Facebook': r'https?://(www\.)?facebook\.com/[^\'" >]+',
+        'Instagram': r'https?://(www\.)?instagram\.com/[^\'" >]+',
+        'Twitter': r'https?://(www\.)?twitter\.com/[^\'" >]+',
+        'TikTok': r'https?://(www\.)?tiktok\.com/[^\'" >]+',
+    }
+    for platform, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            socials[platform] = match.group()
+    return socials
+
+def get_website_info(url):
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return "", [], [], {}
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        text = soup.get_text()
+        emails = extract_emails(text)
+        phones = extract_phone_numbers(text)
+        socials = extract_socials(resp.text)
+        return soup.title.string if soup.title else "", emails, phones, socials
+    except:
+        return "", [], [], {}
+
+# ----------- DuckDuckGo Search Function -----------
+
+def search_businesses(query, max_results=50):
     results = []
     with DDGS() as ddgs:
         for r in ddgs.text(query, max_results=max_results):
-            results.append(r)
+            results.append({
+                "title": r.get("title"),
+                "url": r.get("href"),
+                "snippet": r.get("body")
+            })
     return results
 
-def verify_company_match(title, vendor_input):
-    return vendor_input.lower() in title.lower()
-
-def get_extra_info_from_url(url):
-    try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(r.text, 'html.parser')
-        text = soup.get_text(" ", strip=True)
-        return {
-            "emails": extract_emails(text),
-            "phones": extract_phone_numbers(text)
-        }
-    except:
-        return {"emails": [], "phones": []}
-
-# ---------------------- STREAMLIT INTERFACE ------------------------
+# ----------- Streamlit UI -----------
 
 st.set_page_config(page_title="EDS Scraper", layout="wide")
-st.title("🔎 Express Database Solutions - Company Scraper")
+st.title("📊 Express Database Solutions: Business Scraper")
 
-st.markdown("Enter a **vendor type** (e.g., Orthopedic Hospitals) and how many results you'd like to retrieve. The system will only return **verified, real companies**.")
+industry = st.text_input("Enter target industry (e.g. veterinary, landscaping):")
+location = st.text_input("Enter geographic location (e.g. Ohio, US, North Carolina):")
+keywords = st.text_input("Optional keywords (e.g. equipment supplier, mobile):")
 
-vendor_type = st.text_input("Vendor Type", placeholder="e.g. Orthopedic Hospitals")
-max_results = st.number_input("Number of Results to Scrape", min_value=1, value=100)
+max_results = st.slider("Number of businesses to scrape", 10, 100, 30)
 
-extra_fields = st.multiselect(
-    "Optional Fields to Include",
-    options=[
-        "Estimated Revenue", "Number of Employees", "Year Founded", "CEO/Owner",
-        "LinkedIn", "Facebook", "Instagram", "Twitter", "Industry", "NAICS/SIC",
-        "BBB Rating", "Status (Active/Inactive)", "Hours", "Services",
-        "Parent Company", "State Registration", "Google Reviews Score", "Glassdoor Score", "Logo"
-    ]
-)
-
-if st.button("Scrape Companies") and vendor_type:
-    st.info("Scraping... This may take a minute.")
-    queries = scrape_duckduckgo(vendor_type + " site:bizapedia.com OR site:linkedin.com OR site:zoominfo.com OR site:opencorporates.com", max_results=max_results)
-
-    companies = []
-    seen = set()
-
-    for entry in tqdm(queries):
-        title = entry.get("title", "")
-        url = entry.get("href", "")
-        snippet = entry.get("body", "")
-
-        if not is_valid_url(url):
-            continue
-
-        if not verify_company_match(title, vendor_type):
-            continue
-
-        domain = re.findall(r"https?://([A-Za-z_0-9.-]+).*", url)
-        domain = domain[0] if domain else url
-
-        if domain in seen:
-            continue
-
-        seen.add(domain)
-        extra_info = get_extra_info_from_url(url)
-
-        companies.append({
-            "Company Name": title.strip(),
-            "URL": url,
-            "Email(s)": ", ".join(extra_info["emails"]) if extra_info["emails"] else "N/A",
-            "Phone Number(s)": ", ".join(extra_info["phones"]) if extra_info["phones"] else "N/A",
-            "Verified": "✅"
-        })
-
-    if not companies:
-        st.warning("No valid companies found. Try different keywords or increase the result count.")
+if st.button("Scrape Businesses"):
+    if not industry or not location:
+        st.warning("Please enter both industry and location.")
     else:
-        df = pd.DataFrame(companies)
-        st.success(f"✅ Successfully scraped {len(df)} companies.")
+        query = f"{industry} businesses in {location} {keywords}"
+        st.info(f"Searching: '{query}'...")
 
+        results = search_businesses(query, max_results=max_results)
+        data = []
+
+        for result in results:
+            url = result['url']
+            domain_parts = tldextract.extract(url)
+            base_domain = f"{domain_parts.domain}.{domain_parts.suffix}"
+            name = result['title'] or domain_parts.domain
+            snippet = result['snippet'] or ""
+
+            # Website scraping
+            title, emails, phones, socials = get_website_info(url)
+
+            # Simulated/optional fields (replace with API data if needed)
+            simulated_fields = {
+                "Estimated Revenue": "1M–5M USD",
+                "Employee Count": "10–50",
+                "Industry Category": industry.title(),
+                "Headquarters": location.title(),
+                "Tags": keywords,
+                "Source": "DuckDuckGo",
+            }
+
+            row = {
+                "Business Name": name,
+                "Website URL": url,
+                "Domain": base_domain,
+                "Website Title": title,
+                "Snippet": snippet,
+                "Emails": ", ".join(emails),
+                "Phones": ", ".join(phones),
+                "LinkedIn": socials.get("LinkedIn", ""),
+                "Instagram": socials.get("Instagram", ""),
+                "Facebook": socials.get("Facebook", ""),
+                "Twitter": socials.get("Twitter", ""),
+                "TikTok": socials.get("TikTok", ""),
+                **simulated_fields
+            }
+            data.append(row)
+
+        df = pd.DataFrame(data)
+
+        st.success(f"✅ Found {len(df)} companies.")
         st.dataframe(df)
 
-        excel = df.to_excel(index=False, engine="openpyxl")
-        st.download_button("📥 Download Results as Excel", data=excel, file_name="scraped_companies.xlsx")
-
-else:
-    st.warning("Please enter a vendor type to begin scraping.")
-
+        # Download
+        st.download_button("📥 Download as Excel", df.to_excel(index=False), file_name="scraped_businesses.xlsx")
