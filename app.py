@@ -1,169 +1,148 @@
 import streamlit as st
 import openai
-import os
-from dotenv import load_dotenv
 import pandas as pd
+import re
 import validators
-import phonenumbers
+from duckduckgo_search import ddg
 
-load_dotenv()  # Load .env variables
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# Hardcoded password
 APP_PASSWORD = "vJ2fPq94t2Ls"
 
-openai.api_key = OPENAI_API_KEY
+# Your OpenAI API key should be set as environment variable OPENAI_API_KEY for security
+openai.api_key = st.secrets.get("OPENAI_API_KEY") or ""
 
-def check_password():
-    """Simple password protection"""
-    if "password_correct" not in st.session_state:
-        st.session_state.password_correct = False
+def clean_text(text):
+    return re.sub(r'\s+', ' ', text).strip()
 
-    if not st.session_state.password_correct:
-        pwd = st.text_input("Enter app password:", type="password")
-        if pwd == APP_PASSWORD:
-            st.session_state.password_correct = True
-            st.experimental_rerun()
-        elif pwd:
-            st.error("Incorrect password")
-        return False
-    else:
-        return True
+def validate_url(url):
+    return validators.url(url)
 
-def generate_prompt(industry, additional_categories, num_entries):
-    base_fields = ["Company Name", "Website URL", "Address", "Phone Number", "Email"]
-    additional_fields = [cat.strip() for cat in additional_categories.split(",") if cat.strip()]
-    all_fields = base_fields + additional_fields
+def extract_contact_info(text):
+    phone_pattern = r'(\+?\d{1,2}[-.\s]?)?(\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}'
+    email_pattern = r'[\w\.-]+@[\w\.-]+'
+    phones = re.findall(phone_pattern, text)
+    emails = re.findall(email_pattern, text)
+    phone = phones[0][0] if phones else ""
+    email = emails[0] if emails else ""
+    return phone, email
 
-    prompt = f"""
-You are an expert data extractor. For the industry '{industry}', find {num_entries} unique and real companies in the United States. For each company, provide these fields in JSON format, one company per JSON object:
-
-{all_fields}
-
-- If a field is unavailable, leave it blank.
-- Do not include duplicates.
-- Validate URLs, emails, and phone numbers when possible.
-- Return a JSON array of company objects.
-
-Example format:
-[
-  {{
-    "Company Name": "Example Co",
-    "Website URL": "https://example.com",
-    "Address": "123 Main St, City, State, Zip",
-    "Phone Number": "(123) 456-7890",
-    "Email": "contact@example.com",
-    "LinkedIn Handle": "exampleco",
-    "Estimated Revenue": "$10M"
-  }},
-  ...
-]
-
-Respond ONLY with the JSON array.
-"""
-
+def generate_prompt(industry, additional_categories, company_text):
+    categories_str = ", ".join(["Company Name", "URL", "Address", "Phone", "Email"] + additional_categories)
+    prompt = (
+        f"From the following company description, extract the following details as JSON: {categories_str}. "
+        f"Return empty string \"\" for any missing data.\n\nCompany info:\n{company_text}\n\nJSON:"
+    )
     return prompt
 
-def call_openai_api(prompt):
+def query_openai(prompt):
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=3000
+            temperature=0,
+            max_tokens=300,
         )
-        return response['choices'][0]['message']['content']
+        return response.choices[0].message.content.strip()
     except Exception as e:
         st.error(f"OpenAI API error: {e}")
         return None
 
-def parse_json_response(response_text):
-    import json
+def parse_openai_response(response):
     try:
-        data = json.loads(response_text)
+        # Sometimes response has formatting issues, try to fix it:
+        json_str = response.strip()
+        # Convert single quotes to double quotes if necessary:
+        json_str = json_str.replace("'", '"')
+        data = pd.io.json.loads(json_str)
         return data
-    except Exception as e:
-        st.error(f"Error parsing JSON response: {e}")
+    except Exception:
+        # If JSON parsing fails, return raw text for manual check
         return None
 
-def validate_and_highlight(df):
-    # Validate URLs, emails, phones; mark invalid or missing with highlight
-    def highlight_invalid(s):
-        return ['background-color: #ffcccc' if (pd.isna(x) or x=="") else '' for x in s]
-
-    # URL validation
-    df['Website URL Valid'] = df['Website URL'].apply(lambda x: validators.url(x) if pd.notna(x) and x else False)
-    # Email validation
-    df['Email Valid'] = df['Email'].apply(lambda x: validators.email(x) if pd.notna(x) and x else False)
-    # Phone validation
-    def valid_phone(ph):
-        if not ph or pd.isna(ph):
-            return False
-        try:
-            parsed = phonenumbers.parse(ph, "US")
-            return phonenumbers.is_possible_number(parsed) and phonenumbers.is_valid_number(parsed)
-        except:
-            return False
-    df['Phone Valid'] = df['Phone Number'].apply(valid_phone)
-
-    # Highlight columns with invalid data
-    styles = pd.DataFrame('', index=df.index, columns=df.columns)
-    styles.loc[~df['Website URL Valid'], 'Website URL'] = 'background-color: #ffcccc'
-    styles.loc[~df['Email Valid'], 'Email'] = 'background-color: #ffcccc'
-    styles.loc[~df['Phone Valid'], 'Phone Number'] = 'background-color: #ffcccc'
-
-    # Drop validation helper columns before display/download
-    df_display = df.drop(columns=['Website URL Valid', 'Email Valid', 'Phone Valid'])
-
-    return df_display.style.apply(lambda x: styles.loc[x.name], axis=1)
+def search_companies(industry, max_results=250):
+    query = f"{industry} companies USA"
+    results = ddg(query, max_results=max_results)
+    if not results:
+        return []
+    return results
 
 def main():
-    st.title("Express Database Solutions - Company Scraper")
+    st.title("Express Database Solutions (EDS) Vendor Scraper")
 
-    if not check_password():
-        return
+    password = st.text_input("Enter password to access:", type="password")
+    if password != APP_PASSWORD:
+        st.warning("Incorrect password. Please try again.")
+        st.stop()
 
-    st.markdown("### Enter Search Parameters")
+    industry = st.text_input("Enter industry (e.g. 'Veterinary Hospitals')", value="")
+    additional_input = st.text_input(
+        "Enter additional categories requested (comma separated, e.g. LinkedIn Handle, Employee Number)", value=""
+    )
+    additional_categories = [x.strip() for x in additional_input.split(",") if x.strip()]
+    max_entries = st.number_input("Number of entries to return", min_value=1, max_value=2000, value=250, step=1)
+    location = st.text_input("Optional: Specify location (e.g. United States)", value="United States")
 
-    industry = st.text_input("Industry (e.g. Veterinary Hospitals)", value="")
-    additional_cats = st.text_input("Additional Categories (comma separated, e.g. LinkedIn Handle, Estimated Revenue)", value="")
-    num_entries = st.number_input("Number of Companies to Retrieve", min_value=1, max_value=5000, value=250)
-
-    if st.button("Start Scraping"):
-        if not industry.strip():
-            st.error("Industry cannot be empty.")
+    if st.button("Start scraping"):
+        if not industry:
+            st.error("Please enter an industry.")
             return
 
-        prompt = generate_prompt(industry, additional_cats, num_entries)
-        with st.spinner("Contacting AI and gathering data... this may take a minute or two."):
-            response_text = call_openai_api(prompt)
-            if response_text is None:
-                return
-            data = parse_json_response(response_text)
-            if data is None:
-                return
+        with st.spinner("Searching companies..."):
+            raw_results = search_companies(industry, max_results=max_entries * 2)  # extra to allow filtering duplicates
+            st.success(f"Found {len(raw_results)} raw results")
 
-            df = pd.DataFrame(data)
-            if df.empty:
-                st.warning("No data returned.")
-                return
+        companies = []
+        urls_seen = set()
 
-            styled_df = validate_and_highlight(df)
-            st.dataframe(styled_df, use_container_width=True)
+        for item in raw_results:
+            if len(companies) >= max_entries:
+                break
 
-            # Provide Excel download
-            towrite = pd.ExcelWriter("output.xlsx", engine='openpyxl')
-            df.to_excel(towrite, index=False)
-            towrite.save()
-            towrite.close()
+            url = item.get('href') or item.get('url') or ""
+            if not validate_url(url) or url in urls_seen:
+                continue
 
-            with open("output.xlsx", "rb") as f:
-                st.download_button(
-                    label="📥 Download data as Excel",
-                    data=f,
-                    file_name="company_data.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+            title = item.get('title') or ""
+            snippet = item.get('body') or item.get('snippet') or ""
 
+            combined_text = f"{title}\n{snippet}\nURL: {url}"
+
+            prompt = generate_prompt(industry, additional_categories, combined_text)
+            response = query_openai(prompt)
+            if not response:
+                continue
+
+            try:
+                company_data = pd.io.json.loads(response.replace("'", '"'))
+            except Exception:
+                company_data = None
+
+            if company_data and isinstance(company_data, dict):
+                # Deduplicate by company URL
+                company_url = company_data.get("URL", "")
+                if company_url and company_url not in urls_seen:
+                    urls_seen.add(company_url)
+                    companies.append(company_data)
+
+        if not companies:
+            st.warning("No companies could be extracted. Try broadening your search or check API usage.")
+            return
+
+        df = pd.DataFrame(companies)
+
+        # Highlight unverified or missing data cells in yellow
+        def highlight_missing(s):
+            return ['background-color: yellow' if (v == "" or pd.isna(v)) else '' for v in s]
+
+        st.dataframe(df.style.apply(highlight_missing, axis=1))
+
+        # Export to Excel
+        towrite = pd.ExcelWriter("eds_scraped_companies.xlsx", engine='openpyxl')
+        df.to_excel(towrite, index=False)
+        towrite.save()
+
+        with open("eds_scraped_companies.xlsx", "rb") as f:
+            st.download_button("📥 Download as Excel", data=f, file_name="eds_scraped_companies.xlsx")
 
 if __name__ == "__main__":
     main()
