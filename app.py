@@ -1,163 +1,125 @@
 import streamlit as st
 import requests
+from bs4 import BeautifulSoup
+import time
 import pandas as pd
-import validators
-import phonenumbers
-from io import BytesIO
+from duckduckgo_search import ddg  # pip install duckduckgo_search
 
-# Your Census API key
-CENSUS_API_KEY = "803e7239cc853318598cbdc2ff3be2a63ecb98f9"
+BASE_URL = "https://opencorporates.com/companies"
+HEADERS = {
+    "User-Agent": "EDS Scraper - Contact: your_email@example.com"
+}
+RATE_LIMIT = 2  # seconds between requests
 
-# Data.gov open datasets URLs (JSON/CSV)
-DATA_GOV_OSHA_ESTABLISHMENTS_URL = "https://data.cityofnewyork.us/resource/erm2-nwe9.json?$limit=5000"
-DATA_GOV_SAM_VENDOR_LIST_URL = "https://api.sam.gov/prod/opportunities/v1/search?limit=5000"  # (Note: SAM API usually needs registration, we'll exclude it here)
 
-# Because SAM.gov API requires authentication, we'll omit it. Instead, we'll use OSHA dataset and Census.
+def scrape_opencorporates(industry_keyword, max_pages=3):
+    results = []
 
-# Helper functions
-
-def validate_url(url):
-    if url and validators.url(url):
-        return url
-    return ""
-
-def validate_phone(phone_str):
-    try:
-        x = phonenumbers.parse(phone_str, "US")
-        if phonenumbers.is_valid_number(x):
-            return phonenumbers.format_number(x, phonenumbers.PhoneNumberFormat.INTERNATIONAL)
-    except:
-        pass
-    return ""
-
-def fetch_census_data(industry_code, max_results=100):
-    """
-    Fetch businesses data by NAICS industry code using Census Business API
-    NOTE: Census API returns aggregate data, not individual companies.
-    We'll use it mainly for validation and industry filtering.
-    """
-    # This endpoint returns number of establishments by state for given NAICS
-    url = (
-        "https://api.census.gov/data/timeseries/eits/est"
-        f"?get=naics2017_label,est,emp&for=state:*&NAICS2017={industry_code}&key={CENSUS_API_KEY}"
-    )
-    r = requests.get(url)
-    if r.status_code != 200:
-        st.error(f"Census API error: {r.status_code}")
-        return None
-    data = r.json()
-    df = pd.DataFrame(data[1:], columns=data[0])
-    return df
-
-def fetch_oshanyc_data(max_results=1000):
-    """
-    NYC OSHA inspections dataset - publicly accessible JSON
-    We'll use it as a proxy for real businesses, filter by industry keyword in establishment name.
-    """
-    params = {
-        "$limit": max_results,
-        "$where": "industry_description like '%ORTHOPEDIC%'"
-    }
-    r = requests.get(DATA_GOV_OSHA_ESTABLISHMENTS_URL, params=params)
-    if r.status_code != 200:
-        st.warning(f"OSHA data fetch failed: {r.status_code}")
-        return pd.DataFrame()
-    data = r.json()
-    df = pd.json_normalize(data)
-    return df
-
-def extract_contact_info(row):
-    # Extract contact info safely from OSHA data or placeholder if not present
-    website = validate_url(row.get("website") or "")
-    phone = validate_phone(row.get("telephone") or "")
-    email = row.get("email") if "email" in row else ""
-    address = ", ".join(filter(None, [
-        row.get("address1"),
-        row.get("city"),
-        row.get("state"),
-        row.get("zip"),
-    ]))
-    return website, phone, email, address
-
-def create_final_dataframe(osha_df, max_results=100):
-    """
-    Create final dataframe with verified companies from OSHA dataset
-    and placeholder for cross-checking Census and Data.gov.
-    """
-    companies = []
-    seen = set()
-
-    for idx, row in osha_df.iterrows():
-        name = row.get("establishment_name") or row.get("name") or ""
-        name = name.strip().title()
-        if not name or name.lower() in seen:
-            continue
-        seen.add(name.lower())
-
-        website, phone, email, address = extract_contact_info(row)
-
-        companies.append({
-            "Company Name": name,
-            "Website URL": website,
-            "Phone Number": phone,
-            "Email": email,
-            "Address": address,
-            "Verified (OSHA)": True,
-            "Notes": ""
-        })
-        if len(companies) >= max_results:
+    for page in range(1, max_pages + 1):
+        params = {
+            'q': industry_keyword,
+            'page': page
+        }
+        response = requests.get(BASE_URL, headers=HEADERS, params=params)
+        if response.status_code != 200:
+            st.warning(f"Failed to get page {page} from OpenCorporates")
             break
 
-    df = pd.DataFrame(companies)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        company_rows = soup.select('table.companies tr.company')
+
+        if not company_rows:
+            st.info("No more results found.")
+            break
+
+        for row in company_rows:
+            name_cell = row.select_one('td.name a')
+            jurisdiction_cell = row.select_one('td.jurisdiction')
+            company_number_cell = row.select_one('td.company_number')
+
+            if not name_cell or not jurisdiction_cell or not company_number_cell:
+                continue
+
+            company_name = name_cell.text.strip()
+            company_url = "https://opencorporates.com" + name_cell['href']
+            jurisdiction = jurisdiction_cell.text.strip()
+            company_number = company_number_cell.text.strip()
+
+            results.append({
+                "Name": company_name,
+                "Jurisdiction": jurisdiction,
+                "Company Number": company_number,
+                "Profile URL": company_url
+            })
+
+        time.sleep(RATE_LIMIT)
+
+    return pd.DataFrame(results)
+
+
+def valid_website_url(url, company_name):
+    forbidden_domains = ['facebook.com', 'linkedin.com', 'twitter.com', 'youtube.com', 'wikipedia.org', 'opencorporates.com']
+    url_lower = url.lower()
+    if any(domain in url_lower for domain in forbidden_domains):
+        return False
+
+    company_words = [w.lower() for w in company_name.split() if len(w) > 3]
+    matches = sum(1 for w in company_words if w in url_lower)
+    return matches >= 1
+
+
+def find_website_duckduckgo(company_name, jurisdiction):
+    query = f"{company_name} {jurisdiction} official website"
+    try:
+        results = ddg(query, max_results=3)
+        if results:
+            for result in results:
+                url = result.get('href') or result.get('url')
+                if url and valid_website_url(url, company_name):
+                    return url
+    except Exception as e:
+        st.warning(f"DuckDuckGo search error: {e}")
+    return None
+
+
+def enrich_with_websites(df):
+    websites = []
+    progress_bar = st.progress(0)
+    total = len(df)
+    for idx, row in df.iterrows():
+        website = find_website_duckduckgo(row['Name'], row['Jurisdiction'])
+        websites.append(website)
+        progress_bar.progress((idx + 1) / total)
+        time.sleep(1)
+    df['Website'] = websites
     return df
 
-def highlight_unverified(s):
-    # Highlight rows where Website URL or Phone Number are missing as unverified
-    if not s["Website URL"] or not s["Phone Number"]:
-        return ['background-color: #ffcccc'] * len(s)
-    return [''] * len(s)
 
-# Streamlit UI
+def main():
+    st.title("Express Database Solutions (EDS) - Company Finder")
 
-st.title("Express Database Solutions: Verified Business Scraper")
+    industry = st.text_input("Enter industry keyword(s) to search for companies", value="orthopedic hospitals")
+    max_pages = st.slider("Number of OpenCorporates result pages to scrape (about 10-20 companies per page)", 1, 5, 3)
 
-industry_input = st.text_input("Enter Industry Keyword (e.g. Orthopedic, Veterinary)")
+    if st.button("Start Scraping"):
+        with st.spinner("Scraping OpenCorporates..."):
+            df_companies = scrape_opencorporates(industry, max_pages=max_pages)
+            st.success(f"Scraped {len(df_companies)} companies from OpenCorporates.")
 
-max_results = st.number_input("Max Number of Companies to Return", min_value=10, max_value=5000, value=100, step=10)
+        with st.spinner("Searching DuckDuckGo for company websites... (this may take a while)"):
+            df_enriched = enrich_with_websites(df_companies)
 
-fields_to_include = st.multiselect(
-    "Select Data Fields to Include",
-    options=["Company Name", "Website URL", "Phone Number", "Email", "Address"],
-    default=["Company Name", "Website URL", "Phone Number", "Email", "Address"],
-)
+        st.success("Company data enriched with websites.")
+        st.dataframe(df_enriched)
 
-if st.button("Run Scraper"):
+        to_download = df_enriched.fillna("").to_excel(index=False)
+        st.download_button(
+            label="📥 Download results as Excel",
+            data=to_download,
+            file_name=f"eds_companies_{industry.replace(' ', '_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-    if not industry_input.strip():
-        st.warning("Please enter an industry keyword.")
-    else:
-        with st.spinner("Fetching and verifying data..."):
-            # Fetch OSHA NYC data filtered by industry keyword
-            osha_df = fetch_oshanyc_data(max_results=5000)
-            if osha_df.empty:
-                st.error("No OSHA data found for that industry keyword.")
-            else:
-                filtered_df = create_final_dataframe(osha_df, max_results=max_results)
 
-                # Restrict columns as per user selection
-                filtered_df = filtered_df[fields_to_include + ["Verified (OSHA)", "Notes"]]
-
-                # Highlight unverified rows (missing website or phone)
-                st.dataframe(filtered_df.style.apply(highlight_unverified, axis=1))
-
-                # Prepare Excel download
-                towrite = BytesIO()
-                filtered_df.to_excel(towrite, index=False, engine='openpyxl')
-                towrite.seek(0)
-
-                st.download_button(
-                    label="📥 Download Excel",
-                    data=towrite,
-                    file_name="verified_companies.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
+if __name__ == "__main__":
+    main()
