@@ -3,7 +3,8 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import pandas as pd
-from duckduckgo_search import ddg  # pip install duckduckgo_search
+from duckduckgo_search import ddg
+import io
 
 BASE_URL = "https://opencorporates.com/companies"
 HEADERS = {
@@ -112,10 +113,14 @@ def main():
         st.success("Company data enriched with websites.")
         st.dataframe(df_enriched)
 
-        to_download = df_enriched.fillna("").to_excel(index=False)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_enriched.fillna("").to_excel(writer, index=False)
+        output.seek(0)
+
         st.download_button(
             label="📥 Download results as Excel",
-            data=to_download,
+            data=output,
             file_name=f"eds_companies_{industry.replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
