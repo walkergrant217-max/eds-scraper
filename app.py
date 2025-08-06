@@ -9,7 +9,7 @@ import phonenumbers
 load_dotenv()  # Load .env variables
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-APP_PASSWORD = os.getenv("APP_PASSWORD")
+APP_PASSWORD = "vJ2fPq94t2Ls"
 
 openai.api_key = OPENAI_API_KEY
 
