@@ -1,130 +1,99 @@
 import streamlit as st
+import openai
 import requests
-from bs4 import BeautifulSoup
-import time
 import pandas as pd
-from duckduckgo_search import ddg
-import io
+from duckduckgo_search import DDGS
 
-BASE_URL = "https://opencorporates.com/companies"
-HEADERS = {
-    "User-Agent": "EDS Scraper - Contact: your_email@example.com"
-}
-RATE_LIMIT = 2  # seconds between requests
+# === CONFIGURE ===
+openai.api_key = "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"
+PASSWORD = "vJ2fPq94tZLs"
 
+# === PASSWORD PROTECTION ===
+def check_password():
+    def password_entered():
+        if st.session_state["password"] == PASSWORD:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
 
-def scrape_opencorporates(industry_keyword, max_pages=3):
-    results = []
-
-    for page in range(1, max_pages + 1):
-        params = {
-            'q': industry_keyword,
-            'page': page
-        }
-        response = requests.get(BASE_URL, headers=HEADERS, params=params)
-        if response.status_code != 200:
-            st.warning(f"Failed to get page {page} from OpenCorporates")
-            break
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        company_rows = soup.select('table.companies tr.company')
-
-        if not company_rows:
-            st.info("No more results found.")
-            break
-
-        for row in company_rows:
-            name_cell = row.select_one('td.name a')
-            jurisdiction_cell = row.select_one('td.jurisdiction')
-            company_number_cell = row.select_one('td.company_number')
-
-            if not name_cell or not jurisdiction_cell or not company_number_cell:
-                continue
-
-            company_name = name_cell.text.strip()
-            company_url = "https://opencorporates.com" + name_cell['href']
-            jurisdiction = jurisdiction_cell.text.strip()
-            company_number = company_number_cell.text.strip()
-
-            results.append({
-                "Name": company_name,
-                "Jurisdiction": jurisdiction,
-                "Company Number": company_number,
-                "Profile URL": company_url
-            })
-
-        time.sleep(RATE_LIMIT)
-
-    return pd.DataFrame(results)
-
-
-def valid_website_url(url, company_name):
-    forbidden_domains = ['facebook.com', 'linkedin.com', 'twitter.com', 'youtube.com', 'wikipedia.org', 'opencorporates.com']
-    url_lower = url.lower()
-    if any(domain in url_lower for domain in forbidden_domains):
+    if "password_correct" not in st.session_state:
+        st.text_input("Enter password", type="password", on_change=password_entered, key="password")
         return False
+    elif not st.session_state["password_correct"]:
+        st.text_input("Enter password", type="password", on_change=password_entered, key="password")
+        st.error("😕 Incorrect password")
+        return False
+    else:
+        return True
 
-    company_words = [w.lower() for w in company_name.split() if len(w) > 3]
-    matches = sum(1 for w in company_words if w in url_lower)
-    return matches >= 1
+# === SEARCH + EXTRACTION ===
+def search_duckduckgo(industry, niche, num_results=15):
+    query = f"{industry} {niche} companies directory"
+    with DDGS() as ddgs:
+        results = ddgs.text(query, max_results=num_results)
+    return results
 
+def extract_company_data(result_text):
+    prompt = f"""
+Extract company contact info from the following search result. Provide only real companies. Output as JSON with the fields: company_name, website, email, phone, address, social_media (if available), estimated_employees, estimated_revenue.
 
-def find_website_duckduckgo(company_name, jurisdiction):
-    query = f"{company_name} {jurisdiction} official website"
+Text:
+{result_text}
+
+Return ONLY valid company info.
+"""
     try:
-        results = ddg(query, max_results=3)
-        if results:
-            for result in results:
-                url = result.get('href') or result.get('url')
-                if url and valid_website_url(url, company_name):
-                    return url
-    except Exception as e:
-        st.warning(f"DuckDuckGo search error: {e}")
-    return None
-
-
-def enrich_with_websites(df):
-    websites = []
-    progress_bar = st.progress(0)
-    total = len(df)
-    for idx, row in df.iterrows():
-        website = find_website_duckduckgo(row['Name'], row['Jurisdiction'])
-        websites.append(website)
-        progress_bar.progress((idx + 1) / total)
-        time.sleep(1)
-    df['Website'] = websites
-    return df
-
-
-def main():
-    st.title("Express Database Solutions (EDS) - Company Finder")
-
-    industry = st.text_input("Enter industry keyword(s) to search for companies", value="orthopedic hospitals")
-    max_pages = st.slider("Number of OpenCorporates result pages to scrape (about 10-20 companies per page)", 1, 5, 3)
-
-    if st.button("Start Scraping"):
-        with st.spinner("Scraping OpenCorporates..."):
-            df_companies = scrape_opencorporates(industry, max_pages=max_pages)
-            st.success(f"Scraped {len(df_companies)} companies from OpenCorporates.")
-
-        with st.spinner("Searching DuckDuckGo for company websites... (this may take a while)"):
-            df_enriched = enrich_with_websites(df_companies)
-
-        st.success("Company data enriched with websites.")
-        st.dataframe(df_enriched)
-
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_enriched.fillna("").to_excel(writer, index=False)
-        output.seek(0)
-
-        st.download_button(
-            label="📥 Download results as Excel",
-            data=output,
-            file_name=f"eds_companies_{industry.replace(' ', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        response = openai.ChatCompletion.create(
+            model="gpt-4-1106-preview",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.4
         )
+        content = response.choices[0].message.content
+        return content
+    except Exception as e:
+        return f"Error: {e}"
 
+def parse_json_response(response):
+    try:
+        json_obj = eval(response) if isinstance(response, str) else response
+        return pd.DataFrame(json_obj if isinstance(json_obj, list) else [json_obj])
+    except:
+        return pd.DataFrame()
+
+# === MAIN ===
+def main():
+    if not check_password():
+        return
+
+    st.title("🔍 Express Database Solutions – AI Company Scraper")
+    st.markdown("Enter your industry and niche to get real, verified company data.")
+
+    industry = st.text_input("Industry", placeholder="e.g., Veterinary")
+    niche = st.text_input("Niche", placeholder="e.g., diagnostic labs or software providers")
+
+    if st.button("Find Companies"):
+        if not industry or not niche:
+            st.warning("Please fill in both fields.")
+            return
+
+        with st.spinner("Searching..."):
+            results = search_duckduckgo(industry, niche, num_results=15)
+
+        st.success(f"Found {len(results)} search results. Extracting company info...")
+
+        df_final = pd.DataFrame()
+        for r in results:
+            raw = extract_company_data(r.get("body", ""))
+            df_piece = parse_json_response(raw)
+            df_final = pd.concat([df_final, df_piece], ignore_index=True)
+
+        if not df_final.empty:
+            df_final.drop_duplicates(subset=["company_name", "website"], inplace=True)
+            st.dataframe(df_final)
+            st.download_button("📥 Download CSV", data=df_final.to_csv(index=False), file_name="company_data.csv", mime="text/csv")
+        else:
+            st.error("No valid companies found.")
 
 if __name__ == "__main__":
     main()
