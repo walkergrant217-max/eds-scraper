@@ -2,11 +2,10 @@ streamlit
 pandas
 requests
 beautifulsoup4
-openpyxl
-duckduckgo-search==1.1.0
+tldextract
 phonenumbers
 validators
-python-dotenv
 email-validator
 fake-useragent
-tqdm
+ddgs         # replaced old duckduckgo_search
+openpyxl
