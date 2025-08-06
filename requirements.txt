@@ -1,11 +1,6 @@
-streamlit
-pandas
-requests
-beautifulsoup4
-tldextract
-phonenumbers
-validators
-email-validator
-fake-useragent
-ddgs         # replaced old duckduckgo_search
-openpyxl
+streamlit==1.48.0
+requests==2.32.4
+pandas==2.3.1
+openpyxl==3.1.5
+phonenumbers==9.0.10
+validators==0.35.0
